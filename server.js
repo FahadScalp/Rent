@@ -1,46 +1,79 @@
-// server.js - Dashboard/Agent + Copier SaaS (Clients/Expiry) - Render Ready
+// server.js - Dashboard/Agent + Copier SaaS (Clients/Expiry) - Render Ready (ESM)
 import express from "express";
 import cors from "cors";
 import fs from "fs";
 import crypto from "crypto";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
-app.use(express.static(".")); // serves dashboard.html + admin.html from project root
+
+// ✅ قدّم ملفات الواجهة (dashboard.html + admin.html)
+app.use(express.static(__dirname));
 
 // ================= ENV =================
-const PORT = process.env.PORT || 10000;
+const PORT = Number(process.env.PORT || 10000);
 
-// protects dashboard/agent endpoints (optional)
-const API_KEY = process.env.API_KEY || "";
+// Dashboard/Agent security (اختياري)
+const API_KEY = (process.env.API_KEY || "").trim();
 
-// protects admin endpoints (recommended)
-const ADMIN_KEY = process.env.ADMIN_KEY || "";
+// Admin security (ضروري تجاريًا)
+const ADMIN_KEY = (process.env.ADMIN_KEY || "").trim();
 
-// protects master push
-const MASTER_KEY = process.env.MASTER_KEY || "";
+// Master push security
+const MASTER_KEY = (process.env.MASTER_KEY || "").trim();
+
+// ================= Storage Paths (Disk Friendly) =================
+// إذا ركبت Disk: خل Mount Path مثلاً /var/data
+const DATA_DIR = (process.env.DATA_DIR || __dirname).trim();
+
+const CLIENTS_FILE = process.env.CLIENTS_FILE || path.join(DATA_DIR, "clients.json");
+const COPIER_FILE  = process.env.COPIER_FILE  || path.join(DATA_DIR, "copier_events.json");
+const SLAVES_FILE  = process.env.SLAVES_FILE  || path.join(DATA_DIR, "slaves.json");
 
 // ================= Helpers =================
 function nowMs() { return Date.now(); }
+
+function ensureDirFor(filePath) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
 function readJsonSafe(file, fallback) {
   try {
     if (!fs.existsSync(file)) return fallback;
     const txt = fs.readFileSync(file, "utf8");
     if (!txt.trim()) return fallback;
     return JSON.parse(txt);
-  } catch {
+  } catch (e) {
+    console.error("readJsonSafe failed:", file, e.message);
     return fallback;
   }
 }
+
 function writeJsonSafe(file, obj) {
-  const tmp = file + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
-  fs.renameSync(tmp, file);
+  try {
+    ensureDirFor(file);
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), "utf8");
+    fs.renameSync(tmp, file);
+    return true;
+  } catch (e) {
+    console.error("writeJsonSafe failed:", file, e.message);
+    return false;
+  }
 }
-function randKey(len = 32) {
-  return crypto.randomBytes(len).toString("hex"); // 64 chars if len=32
+
+function randKey(bytes = 24) {
+  // bytes=24 => 48 hex chars
+  return crypto.randomBytes(bytes).toString("hex");
 }
+
 function addDurationMs(code) {
   const day = 24 * 60 * 60 * 1000;
   if (code === "M1") return 31 * day;
@@ -53,36 +86,44 @@ function addDurationMs(code) {
 // ================= Auth =================
 function authOk(req) {
   if (!API_KEY) return true;
-  return req.get("x-api-key") === API_KEY;
+  return (req.get("x-api-key") || "") === API_KEY;
 }
+
 function adminOk(req) {
-  if (!ADMIN_KEY) return true; // allow if you forgot (لكن لا أنصح)
-  return req.get("x-admin-key") === ADMIN_KEY;
+  // ✅ لازم يكون ADMIN_KEY مضبوط على السيرفر
+  if (!ADMIN_KEY) return false;
+  return (req.get("x-admin-key") || "") === ADMIN_KEY;
 }
+
 function masterOk(req) {
   if (!MASTER_KEY) return false;
-  return req.get("x-master-key") === MASTER_KEY;
+  return (req.get("x-master-key") || "") === MASTER_KEY;
 }
 
 // ================= Clients Store =================
-const CLIENTS_FILE = "./clients.json";
 /**
  * client = {
  *   clientId, fullName, groupId, apiKey,
- *   enabled: true/false,
- *   createdAt, expiresAt,
+ *   enabled, createdAt, expiresAt,
  *   boundSlaveId: ""  // enforce 1 MT4 account per client
  * }
  */
 let clients = readJsonSafe(CLIENTS_FILE, { clients: [] });
-function saveClients() { writeJsonSafe(CLIENTS_FILE, clients); }
+if (!clients || typeof clients !== "object" || !Array.isArray(clients.clients)) clients = { clients: [] };
+
+function saveClients() {
+  const ok = writeJsonSafe(CLIENTS_FILE, clients);
+  if (!ok) console.error("saveClients: failed");
+}
 
 function findClientByApiKey(apiKey) {
-  return (clients.clients || []).find(c => c.apiKey === apiKey) || null;
+  return clients.clients.find(c => c.apiKey === apiKey) || null;
 }
+
 function findClientById(clientId) {
-  return (clients.clients || []).find(c => c.clientId === clientId) || null;
+  return clients.clients.find(c => c.clientId === clientId) || null;
 }
+
 function clientActive(c) {
   if (!c) return false;
   if (!c.enabled) return false;
@@ -113,7 +154,7 @@ function requireClient(req, res, groupIdFromReq) {
   return c;
 }
 
-// ================= Dashboard/Agent (your existing system) =================
+// ================= Dashboard/Agent (existing) =================
 const accounts = new Map(); // accountId -> payload
 const commands = new Map(); // accountId -> cmd
 let nextCmdId = 1;
@@ -124,6 +165,11 @@ app.get("/health", (req, res) => {
     now: nowMs(),
     accounts: accounts.size,
     commands: commands.size,
+    // مساعد للتشخيص
+    hasAdminKey: !!ADMIN_KEY,
+    hasMasterKey: !!MASTER_KEY,
+    dataDir: DATA_DIR,
+    files: { CLIENTS_FILE, COPIER_FILE, SLAVES_FILE },
   });
 });
 
@@ -214,18 +260,22 @@ app.post("/api/panic", (req, res) => {
 });
 
 // ================= Copier (Events) =================
-const COPIER_FILE = "./copier_events.json";
 let copier = readJsonSafe(COPIER_FILE, { nextId: 1, events: [] });
+if (!copier || typeof copier !== "object" || !Array.isArray(copier.events)) copier = { nextId: 1, events: [] };
 
 function saveCopier() {
-  // keep last 50k events max
   if (copier.events.length > 50000) copier.events = copier.events.slice(-50000);
-  writeJsonSafe(COPIER_FILE, copier);
+  const ok = writeJsonSafe(COPIER_FILE, copier);
+  if (!ok) console.error("saveCopier: failed");
 }
 
-const SLAVES_FILE = "./slaves.json";
-let slaves = readJsonSafe(SLAVES_FILE, { slaves: {} }); // key: group|slaveId -> { lastAckId, lastSeenAt }
-function saveSlaves() { writeJsonSafe(SLAVES_FILE, slaves); }
+let slaves = readJsonSafe(SLAVES_FILE, { slaves: {} });
+if (!slaves || typeof slaves !== "object" || typeof slaves.slaves !== "object") slaves = { slaves: {} };
+
+function saveSlaves() {
+  const ok = writeJsonSafe(SLAVES_FILE, slaves);
+  if (!ok) console.error("saveSlaves: failed");
+}
 
 function slaveKey(group, slaveId) {
   return `${group}|${slaveId}`;
@@ -315,7 +365,6 @@ app.get("/copier/events", (req, res) => {
   const c = requireClient(req, res, group);
   if (!c) return;
 
-  // enforce boundSlaveId
   if (!c.boundSlaveId) {
     c.boundSlaveId = slaveId;
     saveClients();
@@ -368,13 +417,20 @@ app.post("/copier/ack", (req, res) => {
 });
 
 // ================= Admin endpoints =================
+// ✅ Logging + رفض إذا ADMIN_KEY مو مضبوط
 app.get("/admin/clients", (req, res) => {
-  if (!adminOk(req)) return res.status(401).json({ ok: false, error: "unauthorized admin" });
+  if (!adminOk(req)) {
+    console.log("ADMIN: /admin/clients UNAUTH ip=", req.ip);
+    return res.status(401).json({ ok: false, error: "unauthorized admin" });
+  }
   res.json({ ok: true, now: nowMs(), clients: clients.clients || [] });
 });
 
 app.post("/admin/clients/add", (req, res) => {
-  if (!adminOk(req)) return res.status(401).json({ ok: false, error: "unauthorized admin" });
+  if (!adminOk(req)) {
+    console.log("ADMIN: /admin/clients/add UNAUTH ip=", req.ip);
+    return res.status(401).json({ ok: false, error: "unauthorized admin" });
+  }
 
   const b = req.body || {};
   const fullName = String(b.fullName || "").trim();
@@ -383,8 +439,8 @@ app.post("/admin/clients/add", (req, res) => {
 
   if (!fullName || !groupId) return res.status(400).json({ ok: false, error: "missing fullName/groupId" });
 
-  const clientId = crypto.randomBytes(6).toString("hex"); // 12 chars
-  const apiKey = randKey(24); // 48 bytes hex => long enough
+  const clientId = "C_" + randKey(6);
+  const apiKey = "K_" + randKey(16);
 
   const createdAt = nowMs();
   const expiresAt = createdAt + addDurationMs(duration);
@@ -401,9 +457,10 @@ app.post("/admin/clients/add", (req, res) => {
   };
 
   clients.clients = clients.clients || [];
-  clients.clients.push(c);
+  clients.clients.unshift(c); // ✅ الجديد فوق
   saveClients();
 
+  console.log("ADMIN: client added", { clientId, fullName, groupId, expiresAt });
   res.json({ ok: true, client: c });
 });
 
@@ -463,4 +520,13 @@ app.post("/admin/clients/delete", (req, res) => {
 });
 
 // ================= Start =================
-app.listen(PORT, () => console.log("Server listening on", PORT));
+app.listen(PORT, () => {
+  console.log("Server listening on", PORT);
+  console.log("DATA_DIR:", DATA_DIR);
+  console.log("FILES:", { CLIENTS_FILE, COPIER_FILE, SLAVES_FILE });
+  console.log("ENV:", {
+    hasAPI: !!API_KEY,
+    hasADMIN: !!ADMIN_KEY,
+    hasMASTER: !!MASTER_KEY,
+  });
+});
