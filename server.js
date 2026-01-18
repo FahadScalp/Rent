@@ -30,11 +30,14 @@ const MASTER_KEY = (process.env.MASTER_KEY || "").trim();
 
 // ================= Storage Paths (Disk Friendly) =================
 // إذا ركبت Disk: خل Mount Path مثلاً /var/data
-const DATA_DIR = (process.env.DATA_DIR || __dirname).trim();
+const DATA_DIR = process.env.DATA_DIR || ".";
+function p(file){ return `${DATA_DIR}/${file}`; }
 
-const CLIENTS_FILE = process.env.CLIENTS_FILE || path.join(DATA_DIR, "clients.json");
-const COPIER_FILE  = process.env.COPIER_FILE  || path.join(DATA_DIR, "copier_events.json");
-const SLAVES_FILE  = process.env.SLAVES_FILE  || path.join(DATA_DIR, "slaves.json");
+const CLIENTS_FILE = p("clients.json");
+const COPIER_FILE  = p("copier_events.json");
+const SLAVES_FILE  = p("slaves.json");
+
+
 
 // ================= Helpers =================
 function nowMs() { return Date.now(); }
