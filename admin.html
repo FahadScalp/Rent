@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>إدارة العملاء - Copier SaaS</title>
+  <style>
+    body{margin:0;font-family:system-ui;background:#0b0f14;color:#e6edf3}
+    .wrap{max-width:1100px;margin:20px auto;padding:0 14px}
+    .card{background:#0f1620;border:1px solid #1e2a39;border-radius:14px;padding:14px;margin-bottom:12px}
+    input,select,button{border-radius:12px;border:1px solid #1e2a39;background:#101a26;color:#e6edf3;padding:10px}
+    button{cursor:pointer;font-weight:800}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid #1e2a39;text-align:right;font-size:14px}
+    .pill{padding:6px 10px;border-radius:999px;border:1px solid #1e2a39;display:inline-block}
+    .good{color:#22c55e} .bad{color:#ef4444} .muted{color:#8aa0b3}
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h3 style="margin:0 0 10px">إعدادات الأدمن</h3>
+    <div class="row">
+      <input id="adminKey" placeholder="ADMIN_KEY" style="min-width:260px">
+      <button onclick="saveAdminKey()">حفظ</button>
+      <span class="muted">افتح الصفحة: <span class="pill">/admin.html</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 10px">إضافة عميل جديد</h3>
+    <div class="row">
+      <input id="fullName" placeholder="اسم العميل الكامل" style="min-width:240px">
+      <input id="groupId" placeholder="Group (مثال G1)" style="min-width:140px">
+      <select id="duration">
+        <option value="M1">شهر</option>
+        <option value="M3">3 شهور</option>
+        <option value="M6">6 شهور</option>
+        <option value="Y1">سنة</option>
+      </select>
+      <button onclick="addClient()">➕ إضافة</button>
+      <span id="addMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">قائمة العملاء</h3>
+      <button onclick="loadClients()">تحديث</button>
+    </div>
+    <div class="muted" style="margin-top:8px">أي عميل انتهى اشتراكه أو Disabled لن يستقبل صفقات.</div>
+    <div style="overflow:auto;margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th>الاسم</th>
+            <th>القروب</th>
+            <th>API Key</th>
+            <th>الحالة</th>
+            <th>ينتهي</th>
+            <th>Slave Bind</th>
+            <th>إجراءات</th>
+          </tr>
+        </thead>
+        <tbody id="tb">
+          <tr><td colspan="7" class="muted">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  function getAdminKey(){ return (localStorage.getItem("ADMIN_KEY")||"").trim(); }
+  function saveAdminKey(){
+    localStorage.setItem("ADMIN_KEY", (document.getElementById("adminKey").value||"").trim());
+    alert("تم حفظ ADMIN_KEY");
+  }
+  document.getElementById("adminKey").value = getAdminKey();
+
+  function headers(){
+    const k = getAdminKey();
+    return {
+      "Content-Type":"application/json",
+      "x-admin-key": k
+    };
+  }
+
+  function fmtDate(ms){
+    const d = new Date(Number(ms||0));
+    if(!isFinite(d.getTime())) return "—";
+    return d.toLocaleString("ar");
+  }
+
+  async function jfetch(url, opts){
+    const r = await fetch(url, opts);
+    const t = await r.text();
+    let js = null;
+    try{ js = JSON.parse(t); }catch(e){ throw new Error("Bad JSON: "+t.slice(0,120)); }
+    if(!r.ok) throw new Error(js && js.error ? js.error : ("HTTP "+r.status));
+    return js;
+  }
+
+  async function addClient(){
+    const fullName = (document.getElementById("fullName").value||"").trim();
+    const groupId  = (document.getElementById("groupId").value||"").trim();
+    const duration = document.getElementById("duration").value;
+
+    const msg = document.getElementById("addMsg");
+    msg.textContent = "…";
+
+    try{
+      const res = await jfetch("/admin/clients/add", {
+        method:"POST",
+        headers: headers(),
+        body: JSON.stringify({ fullName, groupId, duration })
+      });
+      msg.textContent = "تمت الإضافة ✅";
+      await loadClients();
+      // نسخ الـ API KEY مباشرة
+      if(res.client && res.client.apiKey){
+        navigator.clipboard.writeText(res.client.apiKey);
+        alert("تم إنشاء العميل ✅\nتم نسخ API Key تلقائيًا.");
+      }
+    }catch(e){
+      msg.textContent = "فشل: " + e.message;
+    }
+  }
+
+  async function setEnabled(clientId, enabled){
+    await jfetch("/admin/clients/disable", {
+      method:"POST", headers: headers(),
+      body: JSON.stringify({ clientId, enabled })
+    });
+    await loadClients();
+  }
+
+  async function extend(clientId, duration){
+    await jfetch("/admin/clients/extend", {
+      method:"POST", headers: headers(),
+      body: JSON.stringify({ clientId, duration })
+    });
+    await loadClients();
+  }
+
+  async function resetBind(clientId){
+    if(!confirm("متأكد تبي تفك ربط الحساب؟")) return;
+    await jfetch("/admin/clients/resetBind", {
+      method:"POST", headers: headers(),
+      body: JSON.stringify({ clientId })
+    });
+    await loadClients();
+  }
+
+  async function delClient(clientId){
+    if(!confirm("حذف العميل نهائيًا؟")) return;
+    await jfetch("/admin/clients/delete", {
+      method:"POST", headers: headers(),
+      body: JSON.stringify({ clientId })
+    });
+    await loadClients();
+  }
+
+  function copyText(txt){
+    navigator.clipboard.writeText(txt||"");
+    alert("تم النسخ ✅");
+  }
+
+  async function loadClients(){
+    const tb = document.getElementById("tb");
+    tb.innerHTML = `<tr><td colspan="7" class="muted">جاري التحميل…</td></tr>`;
+    try{
+      const res = await jfetch("/admin/clients", { headers: headers() });
+      const list = (res.clients||[]);
+      if(!list.length){
+        tb.innerHTML = `<tr><td colspan="7" class="muted">لا يوجد عملاء.</td></tr>`;
+        return;
+      }
+
+      const now = Date.now();
+      tb.innerHTML = list.map(c=>{
+        const active = (c.enabled && Number(c.expiresAt||0) > now);
+        const st = active ? `<span class="good">نشط</span>` : `<span class="bad">منتهي/موقوف</span>`;
+        const bind = c.boundSlaveId ? `<span class="pill">${c.boundSlaveId}</span>` : `<span class="muted">—</span>`;
+        return `
+          <tr>
+            <td>${c.fullName||"—"}</td>
+            <td><span class="pill">${c.groupId||""}</span></td>
+            <td>
+              <button onclick="copyText('${(c.apiKey||"").replace(/'/g,\"\\\\'\")}')">نسخ</button>
+            </td>
+            <td>${st}</td>
+            <td>${fmtDate(c.expiresAt)}</td>
+            <td>${bind}</td>
+            <td>
+              <button onclick="setEnabled('${c.clientId}', true)">Enable</button>
+              <button onclick="setEnabled('${c.clientId}', false)">Disable</button>
+              <button onclick="extend('${c.clientId}', 'M1')">+ شهر</button>
+              <button onclick="extend('${c.clientId}', 'M3')">+ 3</button>
+              <button onclick="resetBind('${c.clientId}')">Reset Bind</button>
+              <button onclick="delClient('${c.clientId}')">Delete</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+    }catch(e){
+      tb.innerHTML = `<tr><td colspan="7" class="bad">فشل: ${e.message}</td></tr>`;
+    }
+  }
+
+  loadClients();
+</script>
+</body>
+</html>
