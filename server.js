@@ -302,7 +302,7 @@ app.post("/copier/push", (req, res) => {
   const b = req.body || {};
   const group = String(b.group || "");
   const type = String(b.type || "");
-  if (!group || (type !== "OPEN" && type !== "CLOSE")) {
+  if (!group || (type !== "OPEN" && type !== "CLOSE" && type !== "MODIFY")) {
     return res.status(400).json({ ok: false, error: "bad group/type" });
   }
 
